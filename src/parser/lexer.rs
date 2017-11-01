@@ -1,7 +1,6 @@
-use std::io::{self, Chars, BufReader, BufRead, Seek};
-use std::fs::File;
+use std::io::{self, Chars, BufReader, Read};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Position {
     from: (usize, usize, usize),
     to: (usize, usize, usize)
@@ -16,7 +15,7 @@ impl Position {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Lexeme {
     Lparren,
     Rparren,
@@ -48,25 +47,16 @@ pub enum Lexeme {
     DocComment(String),
     TopDocComment(String),
 
-    Indent,
-    Unindent,
+    Indent(usize),
+    Unindent(usize),
     Newline,
     Eof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     lexeme: Lexeme,
     position: Position,
-}
-
-// There's no stream regexps for Rust, so I have to implement a FSM myself
-#[derive(Debug, Clone, Copy)]
-enum LexerState {
-    Inital,
-    MaybeInt,
-    MaybeFloat,
-
 }
 
 #[derive(Debug)]
@@ -138,37 +128,51 @@ fn is_special(s: char) -> bool {
     match s {
         '!' ... '&'
         | '*' ... '/'
-        | ';' ... '@'
-        | '\\' | '^' 
-        | '_' | '|' 
+        | ':' ... '@'
+        | '\\' | '^'
+        | '_' | '|'
         | '~' => true,
         _ => false,
     }
 }
 
 #[derive(Debug)]
-struct Lexer {
-    char_iter: Chars<BufReader<File>>,
+struct Lexer<R: Read> {
+    char_iter: Chars<BufReader<R>>,
     cursor: (Option<char>, Option<char>),
-    state: LexerState,
-    chars: String,
     indent: usize,
     seek: usize,
     line: usize,
     column: usize,
 }
 
-impl Lexer {
+impl<R: Read> Lexer<R> {
+    pub fn new(reader: R) -> Result<Self, LexerError> {
+        let mut char_iter = BufReader::new(reader).chars();
+
+        let c = char_iter.next().map_or(Ok(None), |v| v.map(Some))?;
+        let la = char_iter.next().map_or(Ok(None), |v| v.map(Some))?;
+
+        Ok(Lexer {
+            char_iter,
+            cursor: (c, la),
+            indent: 0,
+            seek: 0,
+            line: 0,
+            column: 0,
+        })
+    }
+
     fn shift(&mut self) -> Result<(), LexerError> {
-        let (_, la) = self.cursor;
+        let (ch, la) = self.cursor;
         let next = match self.char_iter.next() {
-            Some(Ok('\n')) => {
-                self.line += 1;
-                self.column = 0;
-                Some('\n')
-            },
             Some(Ok(c)) => {
-                self.column += 1;
+                if ch == Some('\n') {
+                    self.line += 1;
+                    self.column = 0;
+                } else {
+                    self.column += 1
+                }
                 Some(c)
             },
             Some(Err(e)) =>
@@ -201,7 +205,7 @@ impl Lexer {
         let mut indent = 0;
         loop {
             let c = self.cursor;
-            match c.1 {
+            match c.0 {
                 Some(w) if is_whitespace(w) => {
                     indent += 1
                 },
@@ -220,15 +224,17 @@ impl Lexer {
             let res = match indent.cmp(&self.indent) {
                 Greater => Some(Token {
                     position,
-                    lexeme: Lexeme::Indent,
+                    lexeme: Lexeme::Indent(indent - self.indent),
                 }),
                 Less => Some(Token {
                     position,
-                    lexeme: Lexeme::Unindent,
+                    lexeme: Lexeme::Unindent(self.indent - indent),
                 }),
                 Equal => None,
 
             };
+
+            self.indent = indent;
 
             Ok(res)
         } else {
@@ -246,9 +252,7 @@ impl Lexer {
             Some(c) => c,
             None => return Ok(self.point_token(Lexeme::Eof)),
         };
-        let state = self.state;
 
-        use self::LexerState::*;
         use self::Lexeme::*;
         let tok = match c {
             '-' if la == Some('-') => self.comment(),
@@ -259,13 +263,17 @@ impl Lexer {
             '}' => Ok(self.point_token(Rbrace)),
             '(' => Ok(self.point_token(Lparren)),
             ')' => Ok(self.point_token(Rparren)),
+            '\n' => Ok(self.point_token(Newline)),
             '"' => self.string(),
             '\'' => self.char(),
             '0' if la == Some('x') => self.hex_integer(),
             s if is_special(s) => self.operator(),
             l if is_letter(l) => self.word(),
             d if is_digit(d) => self.integer_or_word(),
-            _ => unimplemented!(),
+            _ => {
+                let pos = self.cursor_position();
+                return Err(LexerError::MysteriousChar(pos));
+            },
         };
 
         self.shift()?;
@@ -274,7 +282,18 @@ impl Lexer {
     }
 
     fn read_word(&mut self) -> Result<String, LexerError> {
-        unimplemented!()
+        let mut word = String::new();
+        loop {
+            let eow = !self.cursor.1
+                .map(|c| is_letter(c) || is_digit(c))
+                .unwrap_or(false);
+            word.push(self.cursor.0.unwrap());
+
+            if eow { break }
+            self.shift()?;
+        }
+
+        Ok(word)
     }
 
     fn word(&mut self) -> Result<Token, LexerError> {
@@ -291,6 +310,7 @@ impl Lexer {
         let lexeme = match &*word {
             "_" => Lexeme::Underscore,
             _ if is_mword => Lexeme::Mword(word),
+            _ if is_keyword(&*word) => Lexeme::Keyword(word),
             _ => Lexeme::Word(word),
         };
 
@@ -477,7 +497,7 @@ impl Lexer {
             if eon { break }
             self.shift()?;
         }
-        
+
         let position = Position {
             from: start_pos,
             to: (self.seek, self.line, self.column),
@@ -504,7 +524,7 @@ impl Lexer {
 
     fn operator(&mut self) -> Result<Token, LexerError> {
         let start_pos = (self.seek, self.line, self.column);
-        
+
         let mut operator = String::new();
         loop {
             let eop = !self.cursor.1.map(is_special).unwrap_or(false);
@@ -533,5 +553,66 @@ impl Lexer {
             position,
             lexeme,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lexeme::*;
+    use super::{Lexer, LexerError};
+
+    fn collect_lexemes<R: ::std::io::Read>(lexer: &mut Lexer<R>) -> Vec<super::Lexeme> {
+        let mut lexemes = vec![];
+        loop {
+            let tok = lexer.next_token().unwrap();
+
+            if tok.lexeme == Eof {
+                lexemes.push(Eof);
+                break
+            }
+
+            lexemes.push(tok.lexeme)
+        }
+        lexemes
+    }
+
+    #[test] fn hello_lexer() {
+        let hello = concat!(
+            "main =\n",
+            "    \"Hello, world!\" print_ln\n"
+        ).as_bytes();
+
+        let mut lexer = Lexer::new(hello).unwrap();
+        let mut lexemes = collect_lexemes(&mut lexer);
+
+        assert_eq!(&*lexemes, &[
+            Word("main".to_string()), Equals, Newline,
+            Indent(4), String("Hello, world!".to_string()), Word("print_ln".to_string()), Newline,
+            Eof
+        ])
+    }
+
+    #[test] fn stairs() {
+        let faboor = concat!(
+            "if foo:\n",
+            "    if bar:\n",
+            "        bar foo\n",
+            "    foo bar\n",
+            "else: \n",
+            "    baz baz baz\n"
+        ).as_bytes();
+
+        let mut lexer = Lexer::new(faboor).unwrap();
+        let mut lexemes = collect_lexemes(&mut lexer);
+
+        assert_eq!(&*lexemes, &[
+            Keyword("if".to_string()), Word("foo".to_string()), Colon, Newline,
+            Indent(4), Keyword("if".to_string()), Word("bar".to_string()), Colon, Newline,
+            Indent(4), Word("bar".to_string()), Word("foo".to_string()), Newline,
+            Unindent(4), Word("foo".to_string()), Word("bar".to_string()), Newline,
+            Unindent(4), Keyword("else".to_string()), Colon, Newline,
+            Indent(4), Word("baz".to_string()), Word("baz".to_string()), Word("baz".to_string()), Newline,
+            Eof
+        ])
     }
 }
