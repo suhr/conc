@@ -13,6 +13,19 @@ impl Position {
             to: (abs, line, column),
         }
     }
+
+    pub fn cover(self, other: Position) -> Position {
+        let from =
+            if self.from.0 <= other.from.0 { self.from }
+            else { other.from };
+        let to =
+            if self.to.0 <= other.to.0 { other.to }
+            else { self.to };
+        
+        Position {
+            from, to
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,7 +44,7 @@ pub enum Lexeme {
     Underscore,
     Comma,
     Dot,
-    Larrow,
+    Rarrow,
     Colon,
     Bar,
     Equals,
@@ -55,8 +68,8 @@ pub enum Lexeme {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
-    lexeme: Lexeme,
-    position: Position,
+    pub lexeme: Lexeme,
+    pub position: Position,
 }
 
 #[derive(Debug)]
@@ -137,7 +150,7 @@ fn is_special(s: char) -> bool {
 }
 
 #[derive(Debug)]
-struct Lexer<R: Read> {
+pub struct Lexer<R: Read> {
     char_iter: Chars<BufReader<R>>,
     cursor: (Option<char>, Option<char>),
     indent: usize,
@@ -542,7 +555,7 @@ impl<R: Read> Lexer<R> {
         let lexeme = match &*operator {
             "," => Lexeme::Comma,
             "." => Lexeme::Dot,
-            "->" => Lexeme::Larrow,
+            "->" => Lexeme::Rarrow,
             ":" => Lexeme::Colon,
             "|" => Lexeme::Bar,
             "=" => Lexeme::Equals,
