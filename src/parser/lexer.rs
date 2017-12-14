@@ -10,7 +10,7 @@ impl Position {
     fn point(abs: usize, line: usize, column: usize) -> Self {
         Position {
             from: (abs, line, column),
-            to: (abs, line, column),
+            to: (abs + 1, line, column + 1),
         }
     }
 
@@ -179,23 +179,36 @@ impl<R: Read> Lexer<R> {
     fn shift(&mut self) -> Result<(), LexerError> {
         let (ch, la) = self.cursor;
         let next = match self.char_iter.next() {
-            Some(Ok(c)) => {
-                if ch == Some('\n') {
-                    self.line += 1;
-                    self.column = 0;
-                } else {
-                    self.column += 1
-                }
-                Some(c)
-            },
+            Some(Ok(c)) =>
+                Some(c),
             Some(Err(e)) =>
                 return Err(e.into()),
-            None => None,
+            None => {
+                None
+            },
         };
+
+        match ch {
+            Some('\n') => {
+                self.column = 0;
+                self.line += 1;
+            },
+            _ => {
+                self.column += 1;
+            }
+        }
 
         self.seek += 1;
         self.cursor = (la, next);
         Ok(())
+    }
+
+    fn upper_bound(&self) -> (usize, usize, usize) {
+        (self.seek + 1, self.line, self.column + 1)
+    }
+
+    fn cursor_point(&self) -> (usize, usize, usize) {
+        (self.seek, self.line, self.column)
     }
 
     fn cursor_position(&self) -> Position {
@@ -213,7 +226,7 @@ impl<R: Read> Lexer<R> {
 
     fn skip_whitespace(&mut self) -> Result<Option<Token>, LexerError> {
         let is_line_start = self.column == 0;
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
 
         let mut indent = 0;
         loop {
@@ -227,10 +240,10 @@ impl<R: Read> Lexer<R> {
             self.shift()?
         }
 
-        if is_line_start {
+        if is_line_start && self.cursor.0 != Some('\n') {
             let position = Position {
                 from: start_pos,
-                to: (self.seek, self.line, self.column),
+                to: self.cursor_point(),
             };
 
             use std::cmp::Ordering::*;
@@ -310,7 +323,7 @@ impl<R: Read> Lexer<R> {
     }
 
     fn word(&mut self) -> Result<Token, LexerError> {
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
 
         let word = self.read_word()?;
         let is_mword = match self.cursor.1 {
@@ -329,7 +342,7 @@ impl<R: Read> Lexer<R> {
 
         let position = Position {
             from: start_pos,
-            to: (self.seek, self.line, self.column),
+            to: self.upper_bound(),
         };
 
         Ok(Token {
@@ -339,7 +352,7 @@ impl<R: Read> Lexer<R> {
     }
 
     fn integer_or_word(&mut self) -> Result<Token, LexerError> {
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
 
         let mut thing = String::new();
         let lexeme;
@@ -362,7 +375,7 @@ impl<R: Read> Lexer<R> {
 
                     let position = Position {
                         from: start_pos,
-                        to: (self.seek, self.line, self.column),
+                        to: self.upper_bound(),
                     };
 
                     return Ok(Token {
@@ -377,7 +390,7 @@ impl<R: Read> Lexer<R> {
                     if !self.cursor.0.map(is_digit).unwrap_or(false) {
                         let pos = Position {
                             from: start_pos,
-                            to: (self.seek, self.line, self.column),
+                            to: self.upper_bound(),
                         };
                         return Err(LexerError::InvalidInteger(pos))
                     }
@@ -401,7 +414,7 @@ impl<R: Read> Lexer<R> {
 
         let position = Position {
             from: start_pos,
-            to: (self.seek, self.line, self.column),
+            to: self.upper_bound(),
         };
 
         Ok(Token {
@@ -411,7 +424,7 @@ impl<R: Read> Lexer<R> {
     }
 
     fn comment(&mut self) -> Result<Token, LexerError> {
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
         self.shift()?;
         self.shift()?;
 
@@ -438,7 +451,7 @@ impl<R: Read> Lexer<R> {
 
         let position = Position {
             from: start_pos,
-            to: (self.seek, self.line, self.column),
+            to: self.upper_bound(),
         };
 
         Ok(Token {
@@ -448,7 +461,7 @@ impl<R: Read> Lexer<R> {
     }
 
     fn string(&mut self) -> Result<Token, LexerError> {
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
         self.shift()?;
 
         let mut string = String::new();
@@ -475,7 +488,7 @@ impl<R: Read> Lexer<R> {
 
         let position = Position {
             from: start_pos,
-            to: (self.seek, self.line, self.column),
+            to: self.upper_bound(),
         };
 
         Ok(Token {
@@ -489,7 +502,7 @@ impl<R: Read> Lexer<R> {
     }
 
     fn hex_integer(&mut self) -> Result<Token, LexerError> {
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
         self.shift()?;
         self.shift()?;
 
@@ -513,7 +526,7 @@ impl<R: Read> Lexer<R> {
 
         let position = Position {
             from: start_pos,
-            to: (self.seek, self.line, self.column),
+            to: self.upper_bound(),
         };
 
         Ok(Token {
@@ -536,7 +549,7 @@ impl<R: Read> Lexer<R> {
     }
 
     fn operator(&mut self) -> Result<Token, LexerError> {
-        let start_pos = (self.seek, self.line, self.column);
+        let start_pos = self.cursor_point();
 
         let mut operator = String::new();
         loop {
@@ -549,7 +562,7 @@ impl<R: Read> Lexer<R> {
 
         let position = Position {
             from: start_pos,
-            to: (self.seek, self.line, self.column)
+            to: self.upper_bound()
         };
 
         let lexeme = match &*operator {
@@ -569,9 +582,9 @@ impl<R: Read> Lexer<R> {
     }
 }
 
-#[cfg(test)]
+//#[cfg(test)]
 mod tests {
-    use super::Lexeme::*;
+    use super::Lexeme;
     use super::{Lexer, LexerError};
 
     fn collect_lexemes<R: ::std::io::Read>(lexer: &mut Lexer<R>) -> Vec<super::Lexeme> {
@@ -579,8 +592,8 @@ mod tests {
         loop {
             let tok = lexer.next_token().unwrap();
 
-            if tok.lexeme == Eof {
-                lexemes.push(Eof);
+            if tok.lexeme == Lexeme::Eof {
+                lexemes.push(Lexeme::Eof);
                 break
             }
 
@@ -589,7 +602,52 @@ mod tests {
         lexemes
     }
 
+    fn collect_positions<R: ::std::io::Read>(lexer: &mut Lexer<R>) -> Vec<super::Position> {
+        let mut positions = vec![];
+        loop {
+            let tok = lexer.next_token().unwrap();
+
+            if tok.lexeme == Lexeme::Eof {
+                break
+            }
+
+            positions.push(tok.position)
+        }
+        positions
+    }
+
+    fn draw_positions(positions: &[super::Position]) -> String {
+        let chars = ['x', 'y'];
+
+        let mut line = 0;
+        let mut column = 0;
+
+        let mut string = String::new();
+
+        for (i, p) in positions.iter().enumerate() {
+            while line < p.from.1 {
+                string.push('\n');
+                line += 1;
+                column = 0;
+            }
+
+            while column < p.from.2 {
+                string.push(' ');
+                column += 1;
+            }
+
+            let delta = p.to.2 - p.from.2;
+            for _ in 0..delta {
+                string.push(chars[i % 2]);
+                column += 1;
+            }
+        }
+    
+        string
+    }
+
     #[test] fn hello_lexer() {
+        use self::Lexeme::*;
         let hello = concat!(
             "main =\n",
             "    \"Hello, world!\" print_ln\n"
@@ -601,15 +659,39 @@ mod tests {
         assert_eq!(&*lexemes, &[
             Word("main".to_string()), Equals, Newline,
             Indent(4), String("Hello, world!".to_string()), Word("print_ln".to_string()), Newline,
-            Eof
+            Unindent(4), Eof
         ])
     }
 
+    #[test] fn hello_positions() {
+        use self::Lexeme::*;
+        let hello = concat!(
+            "main =\n",
+            "    \"Hello, world!\" print_ln\n",
+            "    \"Hello, world!\" print_ln\n",
+            "    \"Hello, world!\" print_ln"
+        ).as_bytes();
+
+        let mut lexer = Lexer::new(hello).unwrap();
+        let mut positions = collect_positions(&mut lexer);
+
+        let pretty = draw_positions(&positions);
+        let gold =
+r#"xxxx yx
+yyyyxxxxxxxxxxxxxxx yyyyyyyyx
+    yyyyyyyyyyyyyyy xxxxxxxxy
+    xxxxxxxxxxxxxxx yyyyyyyy"#;
+
+        assert_eq!(gold, &*pretty)
+    }
+
     #[test] fn stairs() {
+        use self::Lexeme::*;
         let faboor = concat!(
             "if foo:\n",
             "    if bar:\n",
             "        bar foo\n",
+            "\n",
             "    foo bar\n",
             "else: \n",
             "    baz baz baz\n"
@@ -622,10 +704,11 @@ mod tests {
             Keyword("if".to_string()), Word("foo".to_string()), Colon, Newline,
             Indent(4), Keyword("if".to_string()), Word("bar".to_string()), Colon, Newline,
             Indent(4), Word("bar".to_string()), Word("foo".to_string()), Newline,
+            Newline,
             Unindent(4), Word("foo".to_string()), Word("bar".to_string()), Newline,
             Unindent(4), Keyword("else".to_string()), Colon, Newline,
             Indent(4), Word("baz".to_string()), Word("baz".to_string()), Word("baz".to_string()), Newline,
-            Eof
+            Unindent(4), Eof
         ])
     }
 }
