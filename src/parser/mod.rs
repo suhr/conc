@@ -16,19 +16,28 @@ enum Decl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum Expr<T> {
+    Plain(T),
+    Empty,
+
+    Comp(Vec<Expr<T>>),
+    Conc(Vec<Expr<T>>),
+    Enclosed(Box<Expr<T>>),
+    Mexpr(Name, Box<Expr<T>>),
+    Tuple(Box<Expr<T>>),
+}
+
+impl<T> From<T> for Expr<T> {
+    fn from(source: T) -> Expr<T> {
+        Expr::Plain(source)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum TypeExpr {
     Word(Name),
     Multiword(Name),
-    Function(Box<TypeExpr>, Box<TypeExpr>),
-
-    Comp(Vec<TypeExpr>),
-    Conc(Vec<TypeExpr>),
-    Enclosed(Box<TypeExpr>),
-    Mexpr(Name, Box<FullExpr>),
-    Tuple(Box<FullExpr>),
-
-    Empty
-}
+    Function(Box<Expr<TypeExpr>>, Box<Expr<TypeExpr>>),}
 
 #[derive(Debug, Clone, PartialEq)]
 struct StackEff {
@@ -41,35 +50,30 @@ struct Name(String, Position);
 
 #[derive(Debug, Clone, PartialEq)]
 enum FullExpr {
-    Comp(Vec<FullExpr>),
-    Conc(Vec<FullExpr>),
+    Quote(Box<Expr<FullExpr>>),
+    List(Box<Expr<FullExpr>>),
 
-    Enclosed(Box<FullExpr>),
-    Quote(Box<FullExpr>),
-    Mexpr(Name, Box<FullExpr>),
-    Tuple(Box<FullExpr>),
-    List(Box<FullExpr>),
-
-    Infix(Box<FullExpr>, Name, Box<FullExpr>),
+    Infix(Box<Expr<FullExpr>>, Name, Box<Expr<FullExpr>>),
     Simple(Simple),
-    Lambda(Pattern, Box<FullExpr>),
+    Lambda(Expr<Pattern>, Box<Expr<FullExpr>>),
+}
 
-    Empty,
+impl From<Simple> for Expr<FullExpr> {
+    fn from(source: Simple) -> Expr<FullExpr> {
+        FullExpr::Simple(source).into()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Pattern {
     Placeholder(Position),
-
-    Comp(Vec<Pattern>),
-    Conc(Vec<Pattern>),
-    Enclosed(Box<Pattern>),
-    Mexpr(Name, Box<FullExpr>),
-    Tuple(Box<FullExpr>),
-
     Simple(Simple),
+}
 
-    Empty,
+impl From<Simple> for Expr<Pattern> {
+    fn from(source: Simple) -> Expr<Pattern> {
+        Pattern::Simple(source).into()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,8 +99,8 @@ fn into_simple(tok: Token) -> Result<Simple, Token> {
 #[derive(Debug, Clone, PartialEq)]
 enum Symbol {
     Token(Token),
-    Pattern(Pattern),
-    FullExpr(FullExpr),
+    Pattern(Expr<Pattern>),
+    FullExpr(Expr<FullExpr>),
 }
 
 impl Symbol {
@@ -252,7 +256,7 @@ fn pop_enclosed<R: io::Read, T>(parser: &mut Parser<R, T>) -> Option<Option<T>> 
 
 }
 
-fn pop_lambda<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> Option<(Pattern, FullExpr)> {
+fn pop_lambda<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> Option<(Expr<Pattern>, Expr<FullExpr>)> {
     let pat = match parser.input.pop()? {
         (Symbol::Pattern(pat), n) => {
             if n + 1 == parser.output.len() {
@@ -273,13 +277,13 @@ fn pop_lambda<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> Option<(Pattern,
     Some((pat, expr))
 }
 
-fn parse_pattern<R: io::Read>(parser: &mut Parser<R, Pattern>, multi_line: bool) -> Result<Pattern, ParserError> {
+fn parse_pattern<R: io::Read>(parser: &mut Parser<R, Expr<Pattern>>, multi_line: bool) -> Result<Expr<Pattern>, ParserError> {
     loop {
         let cond =
-            reduce_simple_pat(parser)
-            || reduce_enclosed_pat(parser)
-            || reduce_conc_pat(parser)
-            || reduce_comp_pat(parser);
+            reduce_simple(parser)
+            || reduce_enclosed(parser)
+            || reduce_conc(parser)
+            || reduce_comp(parser);
         if cond { continue }
 
         match parser.cursor.lexeme {
@@ -302,90 +306,19 @@ fn parse_pattern<R: io::Read>(parser: &mut Parser<R, Pattern>, multi_line: bool)
         }
     }
 
-    parser.terminate_default(Pattern::Empty).ok_or(ParserError::Stuck)
+    parser.terminate_default(Expr::Empty.into()).ok_or(ParserError::Stuck)
 }
 
-fn reduce_simple_pat<R: io::Read>(parser: &mut Parser<R, Pattern>) -> bool {
-    let sym = parser.input.pop();
-    match sym {
-        Some((Symbol::Token(tok), n)) => {
-            match into_simple(tok) {
-                Ok(simple) => {
-                    parser.output.push(Pattern::Simple(simple));
-                    true
-                },
-                Err(tok) => {
-                    parser.input.push((Symbol::Token(tok), n));
-                    false
-                },
-            }
-        },
-        Some(sym) => {
-            parser.input.push(sym);
-            false
-        }
-        _ =>
-            false,
-    }
-}
 
-fn reduce_conc_pat<R: io::Read>(parser: &mut Parser<R, Pattern>) -> bool {
-    match pop_conc(parser) {
-        Some((Pattern::Conc(mut conc), e2)) => {
-            conc.push(e2);
-            parser.output.push(Pattern::Conc(conc));
-            true
-        },
-        Some((e1, e2)) => {
-            parser.output.push(Pattern::Conc(vec![e1, e2]));
-            true
-        }
-        _ =>
-            false,
-    }
-}
-
-fn reduce_comp_pat<R: io::Read>(parser: &mut Parser<R, Pattern>) -> bool {
-    match pop_comp(parser) {
-        Some((Pattern::Comp(mut comp), e2)) => {
-            comp.push(e2);
-            parser.output.push(Pattern::Comp(comp));
-            true
-        },
-        Some((e1,e2)) => {
-            parser.output.push(Pattern::Comp(vec![e1, e2]));
-            true
-        },
-        None =>
-            false,
-    }
-}
-
-fn reduce_enclosed_pat<R: io::Read>(parser: &mut Parser<R, Pattern>) -> bool {
-    match pop_enclosed(parser) {
-        Some(Some(e)) => {
-            parser.output.push(Pattern::Enclosed(Box::new(e)));
-            true
-        },
-        Some(None) => {
-            let e = Pattern::Empty;
-            parser.output.push(Pattern::Enclosed(Box::new(e)));
-            true
-        }
-        None =>
-            false,
-    }
-}
-
-fn parse_fullexpr<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> Result<FullExpr, ParserError> {
+fn parse_fullexpr<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> Result<Expr<FullExpr>, ParserError> {
     loop {
         //println!("OUTPUT: {:?}", parser.output);
         // reduce
         let cond =
-            reduce_simple_fe(parser)
-            || reduce_enclosed_fe(parser)
-            || reduce_conc_fe(parser)
-            || reduce_comp_fe(parser);
+            reduce_simple(parser)
+            || reduce_enclosed(parser)
+            || reduce_conc(parser)
+            || reduce_comp(parser);
         if cond { continue }
 
         // shift
@@ -411,7 +344,7 @@ fn parse_fullexpr<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> Result<FullE
         //println!("INPUT: {:?}", parser.input);
     }
 
-    parser.terminate_default(FullExpr::Empty).ok_or(ParserError::Stuck)
+    parser.terminate_default(Expr::Empty).ok_or(ParserError::Stuck)
 }
 
 fn check_basic<R: io::Read, T>(parser: &mut Parser<R, T>) -> bool {
@@ -443,7 +376,7 @@ fn check_rparren<R: io::Read, T>(parser: &mut Parser<R, T>) -> bool {
     }
 }
 
-fn check_lambda<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> Result<bool, ParserError> {
+fn check_lambda<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> Result<bool, ParserError> {
     if parser.cursor.lexeme != Lexeme::Rarrow {
         return Ok(false)
     }
@@ -467,13 +400,13 @@ fn check_lambda<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> Result<bool, P
     }
 }
 
-fn reduce_simple_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
+fn reduce_simple<R: io::Read, T: From<Simple>>(parser: &mut Parser<R, T>) -> bool {
     let sym = parser.input.pop();
     match sym {
         Some((Symbol::Token(tok), n)) => {
             match into_simple(tok) {
                 Ok(simple) => {
-                    parser.output.push(FullExpr::Simple(simple));
+                    parser.output.push(simple.into());
                     true
                 },
                 Err(tok) => {
@@ -491,15 +424,15 @@ fn reduce_simple_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
     }
 }
 
-fn reduce_conc_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
+fn reduce_conc<R: io::Read, T>(parser: &mut Parser<R, Expr<T>>) -> bool {
     match pop_conc(parser) {
-        Some((FullExpr::Conc(mut conc), e2)) => {
+        Some((Expr::Conc(mut conc), e2)) => {
             conc.push(e2);
-            parser.output.push(FullExpr::Conc(conc));
+            parser.output.push(Expr::Conc(conc));
             true
         },
         Some((e1, e2)) => {
-            parser.output.push(FullExpr::Conc(vec![e1, e2]));
+            parser.output.push(Expr::Conc(vec![e1, e2]));
             true
         }
         _ =>
@@ -507,15 +440,15 @@ fn reduce_conc_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
     }
 }
 
-fn reduce_comp_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
+fn reduce_comp<R: io::Read, T>(parser: &mut Parser<R, Expr<T>>) -> bool {
     match pop_comp(parser) {
-        Some((FullExpr::Comp(mut comp), e2)) => {
+        Some((Expr::Comp(mut comp), e2)) => {
             comp.push(e2);
-            parser.output.push(FullExpr::Comp(comp));
+            parser.output.push(Expr::Comp(comp));
             true
         },
         Some((e1,e2)) => {
-            parser.output.push(FullExpr::Comp(vec![e1, e2]));
+            parser.output.push(Expr::Comp(vec![e1, e2]));
             true
         },
         None =>
@@ -523,15 +456,15 @@ fn reduce_comp_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
     }
 }
 
-fn reduce_enclosed_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
+fn reduce_enclosed<R: io::Read, T>(parser: &mut Parser<R, Expr<T>>) -> bool {
     match pop_enclosed(parser) {
         Some(Some(e)) => {
-            parser.output.push(FullExpr::Enclosed(Box::new(e)));
+            parser.output.push(Expr::Enclosed(Box::new(e)));
             true
         },
         Some(None) => {
-            let e = FullExpr::Empty;
-            parser.output.push(FullExpr::Enclosed(Box::new(e)));
+            let e = Expr::Empty;
+            parser.output.push(Expr::Enclosed(Box::new(e)));
             true
         }
         None =>
@@ -539,10 +472,10 @@ fn reduce_enclosed_fe<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
     }
 }
 
-fn reduce_lambda<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
+fn reduce_lambda<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> bool {
     match pop_lambda(parser) {
         Some((pat, expr)) => {
-            parser.output.push(FullExpr::Lambda(pat, Box::new(expr)));
+            parser.output.push(FullExpr::Lambda(pat, Box::new(expr)).into());
             true
         },
         _ => {
@@ -556,6 +489,10 @@ fn reduce_lambda<R: io::Read>(parser: &mut Parser<R, FullExpr>) -> bool {
 mod tests {
     use super::*;
 
+    trait Format {
+        fn format(&self, indent: usize) -> String;
+    }
+
     fn format_indented(s: &str, indent: usize) -> String {
         let mut string = String::new();
         for _ in 0..indent {
@@ -565,115 +502,103 @@ mod tests {
         format!("{}{}\n", string, s)
     }
 
-    fn format_pattern(pat: &Pattern, indent: usize) -> String {
-        match pat {
-            &Pattern::Simple(Simple::String(ref s, _)) => {
-                let s = format!("String {:?}", s);
-                format_indented(&s, indent)
-            },
-            &Pattern::Simple(Simple::Char(ref c, _)) => {
-                let s = format!("Char {:?}", c);
-                format_indented(&s, indent)
-            },
-            &Pattern::Simple(Simple::Float(ref f, _)) => {
-                let s = format!("Float {:?}", f);
-                format_indented(&s, indent)
-            },
-            &Pattern::Simple(Simple::Integer(ref i, _)) => {
-                let s = format!("Integer {:?}", i);
-                format_indented(&s, indent)
-            },
-            &Pattern::Simple(Simple::Word(ref w, _)) => {
-                let s = format!("Word {:?}", w);
-                format_indented(&s, indent)
-            },
-            &Pattern::Comp(ref comp) => {
-                let mut res = format_indented("Comp", indent);
-                for e in comp {
-                    let t = format_pattern(&e, indent + 2);
-                    res.push_str(&t);
-                }
-                res
-            },
-            &Pattern::Conc(ref conc) => {
-                let mut res = format_indented("Conc", indent);
-                for e in conc {
-                    let t = format_pattern(&e, indent + 2);
-                    res.push_str(&t);
-                }
-                res
-            },
-            &Pattern::Enclosed(ref e) => {
-                let mut res = format_indented("Enclosed", indent);
-                let t = format_pattern(&e, indent + 2);
-                res.push_str(&t);
-                res
-            },
-            &Pattern::Empty => {
-                format_indented("Empty", indent)
-            },
-            _ => unimplemented!(),
+    impl Format for Simple {
+        fn format(&self, indent: usize) -> String {
+            match self {
+                &Simple::String(ref s, _) => {
+                    let s = format!("String {:?}", s);
+                    format_indented(&s, indent)
+                },
+                &Simple::Char(ref c, _) => {
+                    let s = format!("Char {:?}", c);
+                    format_indented(&s, indent)
+                },
+                &Simple::Float(ref f, _) => {
+                    let s = format!("Float {:?}", f);
+                    format_indented(&s, indent)
+                },
+                &Simple::Integer(ref i, _) => {
+                    let s = format!("Integer {:?}", i);
+                    format_indented(&s, indent)
+                },
+                &Simple::Word(ref w, _) => {
+                    let s = format!("Word {:?}", w);
+                    format_indented(&s, indent)
+                },
+            }
         }
     }
 
-    fn format_fullexpr(expr: &FullExpr, indent: usize) -> String {
-        match expr {
-            &FullExpr::Simple(Simple::String(ref s, _)) => {
-                let s = format!("String {:?}", s);
-                format_indented(&s, indent)
-            },
-            &FullExpr::Simple(Simple::Char(ref c, _)) => {
-                let s = format!("Char {:?}", c);
-                format_indented(&s, indent)
-            },
-            &FullExpr::Simple(Simple::Float(ref f, _)) => {
-                let s = format!("Float {:?}", f);
-                format_indented(&s, indent)
-            },
-            &FullExpr::Simple(Simple::Integer(ref i, _)) => {
-                let s = format!("Integer {:?}", i);
-                format_indented(&s, indent)
-            },
-            &FullExpr::Simple(Simple::Word(ref w, _)) => {
-                let s = format!("Word {:?}", w);
-                format_indented(&s, indent)
-            },
-            &FullExpr::Comp(ref comp) => {
-                let mut res = format_indented("Comp", indent);
-                for e in comp {
-                    let t = format_fullexpr(&e, indent + 2);
-                    res.push_str(&t);
-                }
-                res
-            },
-            &FullExpr::Conc(ref conc) => {
-                let mut res = format_indented("Conc", indent);
-                for e in conc {
-                    let t = format_fullexpr(&e, indent + 2);
-                    res.push_str(&t);
-                }
-                res
-            },
-            &FullExpr::Enclosed(ref e) => {
-                let mut res = format_indented("Enclosed", indent);
-                let t = format_fullexpr(&e, indent + 2);
-                res.push_str(&t);
-                res
-            },
-            &FullExpr::Empty => {
-                format_indented("Empty", indent)
-            },
-            &FullExpr::Lambda(ref pat, ref e) => {
-                let mut res = format_indented("Lambda", indent);
+    impl<T: Format> Format for Expr<T> {
+        fn format(&self, indent: usize) -> String {
+            match self {
+                &Expr::Plain(ref v) => v.format(indent),
+                &Expr::Comp(ref comp) => {
+                    let mut res = format_indented("Comp", indent);
+                    for e in comp {
+                        res.push_str(&e.format(indent + 2));
+                    }
+                    res
+                },
+                &Expr::Conc(ref conc) => {
+                    let mut res = format_indented("Conc", indent);
+                    for e in conc {
+                        res.push_str(&e.format(indent + 2));
+                    }
+                    res
+                },
+                &Expr::Enclosed(ref e) => {
+                    let mut res = format_indented("Enclosed", indent);
+                    res.push_str(&e.format(indent + 2));
+                    res
+                },
+                &Expr::Mexpr(ref w, ref e) => {
+                    let mut res = format_indented("MExpr", indent);
+                    res.push_str(&format_indented(&format!("Word {}", w.0), indent + 2));
+                    res.push_str(&e.format(indent + 2));
+                    res
+                },
+                &Expr::Tuple(ref e) => {
+                    let mut res = format_indented("Enclosed", indent);
+                    res.push_str(&e.format(indent + 2));
+                    res
+                },
+                &Expr::Empty => {
+                    format_indented("Empty", indent)
+                },
+            }
+        }
+    }
 
-                res.push_str(&format_indented("Pattern", indent + 2));
-                res.push_str(&format_pattern(pat, indent + 4));
-                res.push_str(&format_indented("Expr", indent + 2));
-                res.push_str(&format_fullexpr(e, indent + 4));
+    impl Format for Pattern {
+        fn format(&self, indent: usize) -> String {
+            match self {
+                &Pattern::Placeholder(_) => {
+                    format_indented("Placeholder", indent)
+                }
+                &Pattern::Simple(ref s) =>
+                    s.format(indent)
+            }
+        }
+    }
 
-                res
-            },
-            _ => unimplemented!(),
+    impl Format for FullExpr {
+        fn format(&self, indent: usize) -> String {
+            match self {
+                &FullExpr::Simple(ref s) =>
+                    s.format(indent),
+                &FullExpr::Lambda(ref pat, ref e) => {
+                    let mut res = format_indented("Lambda", indent);
+
+                    res.push_str(&format_indented("Pattern", indent + 2));
+                    res.push_str(&pat.format(indent + 4));
+                    res.push_str(&format_indented("Expr", indent + 2));
+                    res.push_str(&e.format(indent + 4));
+
+                    res
+                },
+                _ => unimplemented!(),
+            }
         }
     }
 
@@ -684,7 +609,7 @@ mod tests {
         let mut parser = Parser::new(&mut lexer).unwrap();
         let expr = parse_fullexpr(&mut parser).unwrap();
 
-        let pretty = format_fullexpr(&expr, 0);
+        let pretty = expr.format(0);
         let gold =
     // Raw string litreals are painful
 r#"Comp
@@ -710,7 +635,7 @@ r#"Comp
         let mut parser = Parser::new(&mut lexer).unwrap();
         let expr = parse_fullexpr(&mut parser).unwrap();
 
-        let pretty = format_fullexpr(&expr, 0);
+        let pretty = expr.format(0);
         let gold =
 r#"Conc
   Enclosed
@@ -735,8 +660,18 @@ r#"Conc
         let mut parser = Parser::new(&mut lexer).unwrap();
         let expr = parse_fullexpr(&mut parser).unwrap();
 
-        let pretty = format_fullexpr(&expr, 0);
-
-        assert_eq!("", pretty);
+        let pretty = expr.format(0);
+        let gold =
+r#"Comp
+  String "Hello world"
+  Lambda
+    Pattern
+      Word "hello"
+    Expr
+      Comp
+        Word "hello"
+        Word "print_ln"
+"#;
+        assert_eq!(gold, pretty);
     }
 }
