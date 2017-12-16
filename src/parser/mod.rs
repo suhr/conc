@@ -4,15 +4,16 @@ use self::lexer::{Lexer, Token, Lexeme, LexerError, Position};
 
 mod lexer;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SyntaxTree {
     root: Vec<Decl>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Decl {
-    FuncDef(Name, Option<StackEff>, FullExpr),
-    FuncType(Name, TypeExpr)
+    DataDef(Pattern, Vec<Pattern>),
+    FuncDef(Name, Option<StackEff>, Expr<FullExpr>),
+    FuncType(Name, Expr<TypeExpr>)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,7 +38,8 @@ impl<T> From<T> for Expr<T> {
 enum TypeExpr {
     Word(Name),
     Multiword(Name),
-    Function(Box<Expr<TypeExpr>>, Box<Expr<TypeExpr>>),}
+    Function(Box<Expr<TypeExpr>>, Box<Expr<TypeExpr>>),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct StackEff {
@@ -49,6 +51,9 @@ struct StackEff {
 struct Name(String, Position);
 
 #[derive(Debug, Clone, PartialEq)]
+struct Branch(Vec<Expr<Pattern>>, Expr<FullExpr>);
+
+#[derive(Debug, Clone, PartialEq)]
 enum FullExpr {
     Quote(Box<Expr<FullExpr>>),
     List(Box<Expr<FullExpr>>),
@@ -56,6 +61,9 @@ enum FullExpr {
     Infix(Box<Expr<FullExpr>>, Name, Box<Expr<FullExpr>>),
     Simple(Simple),
     Lambda(Expr<Pattern>, Box<Expr<FullExpr>>),
+
+    Case(Box<Expr<FullExpr>>, Vec<Branch>),
+    If(Box<Expr<FullExpr>>, Box<Expr<FullExpr>>, Option<Box<Expr<FullExpr>>>),
 }
 
 impl From<Simple> for Expr<FullExpr> {
@@ -101,6 +109,7 @@ enum Symbol {
     Token(Token),
     Pattern(Expr<Pattern>),
     FullExpr(Expr<FullExpr>),
+    Decl(Decl),
 }
 
 impl Symbol {
@@ -122,7 +131,11 @@ impl Symbol {
 pub enum ParserError {
     LexerError(LexerError),
     ExpectedFound(Vec<Lexeme>, Token),
-    Stuck,
+    ExpectedIndentFound(Token),
+    ExpectedUnindentFound(Token),
+    ExpectedWordFound(Token),
+    UnclosedIndent(Position),
+    Stuck(Position),
 }
 
 impl ::std::convert::From<LexerError> for ParserError {
@@ -151,6 +164,10 @@ impl<'a, R: io::Read, T> Parser<'a, R, T> {
         })
     }
 
+    fn insert_symbol(&mut self, symbol: Symbol) {
+        self.input.push((symbol, self.output.len()))
+    }
+
     fn shift_lexer(&mut self) -> Result<Token, ParserError> {
         let mut tok = self.lexer.next_token()?;
         ::std::mem::swap(&mut tok, &mut self.cursor);
@@ -160,7 +177,7 @@ impl<'a, R: io::Read, T> Parser<'a, R, T> {
 
     fn shift(&mut self) -> Result<(), ParserError> {
         let tok = self.shift_lexer()?;
-        self.input.push((Symbol::Token(tok), self.output.len()));
+        self.insert_symbol(Symbol::Token(tok));
 
         Ok(())
     }
@@ -169,24 +186,191 @@ impl<'a, R: io::Read, T> Parser<'a, R, T> {
         Some(self.input.last()?.1)
     }
 
+    fn expect(&self, lexeme: Lexeme) -> Result<(), ParserError> {
+        if self.cursor.lexeme == lexeme {
+            Ok(())
+        } else {
+            Err(ParserError::ExpectedFound(vec![lexeme], self.cursor.clone()))
+        }
+    }
+
+    fn expect_shift_lexer(&mut self, lexeme: Lexeme) -> Result<Token, ParserError> {
+        self.expect(lexeme)?;
+        self.shift_lexer()
+    }
+
     fn decay(self) -> Token {
         self.cursor
     }
 
-    fn terminate_default(&mut self, fallback: T) -> Option<T> {
+    fn terminate_default(&mut self, fallback: T) -> Result<T, ParserError> {
         match (self.input.is_empty(), self.output.len()) {
-            (true, 0) => Some(fallback),
-            (true, 1) => self.output.pop(),
-            _ => None,
+            (true, 0) =>
+                Ok(fallback),
+            (true, 1) =>
+                self.output.pop()
+                .ok_or(ParserError::Stuck(self.cursor.position)),
+            _ =>
+                Err(ParserError::Stuck(self.cursor.position)),
         }
     }
 
-    fn terminate(&mut self) -> Option<T> {
+    fn terminate(&mut self) -> Result<T, ParserError> {
         if self.input.is_empty() && self.output.len() == 1 {
             self.output.pop()
+            .ok_or(ParserError::Stuck(self.cursor.position))
+        } else {
+            Err(ParserError::Stuck(self.cursor.position))
+        }
+    }
+}
+
+
+fn parse_root<R: io::Read>(parser: &mut Parser<R, SyntaxTree>) -> Result<SyntaxTree, ParserError> {
+    parser.output.push(Default::default());
+
+    loop {
+        println!("OUTPUT: {:?}", parser.output);
+        let cond =
+            reduce_decl(parser);
+        if cond { continue }
+
+        match parser.cursor.lexeme {
+            Lexeme::Newline | Lexeme::Comment(_) =>
+                drop(parser.shift_lexer()?),
+            Lexeme::Eof =>
+                break,
+            _ => (),
+        }
+
+        let cond =
+            check_word(parser)?;
+        if cond {
+            //parser.shift()?
+        } else {
+            break
+        }
+        println!("INPUT: {:?}", parser.input);
+    }
+
+    parser.terminate()
+}
+
+fn parse_in_block<R: io::Read, T1, T2, F>(parser: &mut Parser<R, T1>, func: F) -> Result<T2, ParserError>
+where F: Fn(&mut Parser<R, T2>) -> Result<T2, ParserError>
+{
+    let indent = match parser.cursor.lexeme {
+        Lexeme::Indent(n) => n,
+        _ => return Err(ParserError::ExpectedIndentFound(parser.cursor.clone()))
+    };
+
+    let res = {
+        let mut inner = Parser::new(parser.lexer)?;
+        let res = func(&mut inner)?;
+        parser.cursor = inner.decay();
+
+        res
+    };
+
+    let unindent = match parser.cursor.lexeme {
+        Lexeme::Unindent(n) => n,
+        _ => return Err(ParserError::ExpectedUnindentFound(parser.cursor.clone()))
+    };
+
+    if unindent < indent {
+        return Err(ParserError::UnclosedIndent(parser.cursor.position))
+    } else if unindent == indent {
+        parser.shift_lexer()?;
+    } else {
+        parser.cursor.lexeme = Lexeme::Unindent(unindent - indent)
+    }
+
+    Ok(res)
+}
+
+fn parse_stackeff<R: io::Read, T>(parser: &mut Parser<R, T>) -> Result<StackEff, ParserError> {
+    let mut input = vec![];
+    let mut output = vec![];
+
+    let mut is_output = false;
+
+    loop {
+        match parser.cursor.lexeme {
+            Lexeme::Word(ref word) if is_output =>
+                output.push(Name(word.clone(), parser.cursor.position)),
+            Lexeme::Word(ref word) =>
+                input.push(Name(word.clone(), parser.cursor.position)),
+            Lexeme::Operator(ref tilda) if &*tilda == "~" && !is_output =>
+                is_output = true,
+            _ =>
+                break,
+        }
+
+        parser.shift_lexer()?;
+    }
+
+    Ok(StackEff {
+        input, output
+    })
+}
+
+fn parse_funcdef<R: io::Read, T>(parser: &mut Parser<R, T>, name: Name) -> Result<Decl, ParserError> {
+    let eff =
+        if parser.cursor.lexeme == Lexeme::Lparren {
+            parser.shift_lexer()?;
+            let eff = Some(parse_stackeff(parser)?);
+            parser.expect_shift_lexer(Lexeme::Rparren)?;
+            parser.expect_shift_lexer(Lexeme::Equals)?;
+
+            eff
         } else {
             None
+        };
+
+    parser.shift_lexer()?;
+    let expr = parse_in_block(parser, parse_fullexpr)?;
+
+    Ok(Decl::FuncDef(name, eff, expr))
+}
+
+fn check_word<R: io::Read, T>(parser: &mut Parser<R, T>) -> Result<bool, ParserError> {
+    if let Lexeme::Word(word) = parser.cursor.lexeme.clone() {
+        let name = Name(word.clone(), parser.cursor.position);
+        parser.shift_lexer()?;
+
+        match parser.cursor.lexeme.clone() {
+            Lexeme::Lparren | Lexeme::Equals => {
+                let decl = parse_funcdef(parser, name)?;
+                parser.insert_symbol(Symbol::Decl(decl));
+            },
+            Lexeme::Colon => {
+                unimplemented!()
+            },
+            _ =>
+                return Err(ParserError::ExpectedFound(
+                    vec![Lexeme::Equals, Lexeme::Colon],
+                    parser.cursor.clone()
+                ))
         }
+
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn reduce_decl<R: io::Read>(parser: &mut Parser<R, SyntaxTree>) -> bool {
+    match parser.input.pop() {
+        Some((Symbol::Decl(decl), _)) => {
+            parser.output.last_mut().unwrap().root.push(decl);
+            true
+        }
+        Some(sym_n) => {
+            parser.input.push(sym_n);
+            false
+        },
+        None =>
+            false,
     }
 }
 
@@ -306,13 +490,13 @@ fn parse_pattern<R: io::Read>(parser: &mut Parser<R, Expr<Pattern>>, multi_line:
         }
     }
 
-    parser.terminate_default(Expr::Empty.into()).ok_or(ParserError::Stuck)
+    parser.terminate_default(Expr::Empty.into())
 }
 
 
 fn parse_fullexpr<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> Result<Expr<FullExpr>, ParserError> {
     loop {
-        //println!("OUTPUT: {:?}", parser.output);
+        // println!("OUTPUT: {:?}", parser.output);
         // reduce
         let cond =
             reduce_simple(parser)
@@ -341,10 +525,10 @@ fn parse_fullexpr<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> Result
             reduce_lambda(parser)
             || break;
         }
-        //println!("INPUT: {:?}", parser.input);
+        // println!("INPUT: {:?}", parser.input);
     }
 
-    parser.terminate_default(Expr::Empty).ok_or(ParserError::Stuck)
+    parser.terminate_default(Expr::Empty)
 }
 
 fn check_basic<R: io::Read, T>(parser: &mut Parser<R, T>) -> bool {
@@ -485,7 +669,7 @@ fn reduce_lambda<R: io::Read>(parser: &mut Parser<R, Expr<FullExpr>>) -> bool {
 }
 
 
-#[cfg(test)]
+//#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -602,6 +786,62 @@ mod tests {
         }
     }
 
+    impl Format for Name {
+        fn format(&self, indent: usize) -> String {
+            let s = format!("Name {:?}", self.0);
+            format_indented(&s, indent)
+        }
+    }
+
+    impl Format for StackEff {
+        fn format(&self, indent: usize) -> String {
+            let mut res = format_indented("Stackeff", indent);
+
+            res.push_str(&format_indented("In", indent + 2));
+            for w in &self.input {
+                res.push_str(&w.format(indent + 4));
+            }
+
+            res.push_str(&format_indented("Out", indent + 2));
+            for w in &self.output {
+                res.push_str(&w.format(indent + 4));
+            }
+
+            res
+        }
+    }
+
+    impl Format for Decl {
+        fn format(&self, indent: usize) -> String {
+            match self {
+                &Decl::FuncDef(ref name, ref stack_eff, ref expr) => {
+                    let mut res = format_indented("Funcdef", indent);
+
+                    res.push_str(&name.format(indent + 2));
+                    if let Some(ref eff) = *stack_eff {
+                        res.push_str(&eff.format(indent + 2));
+                    }
+                    res.push_str(&format_indented("Expr", indent + 2));
+                    res.push_str(&expr.format(indent + 4));
+
+                    res
+                },
+                _ => unimplemented!()
+            }
+        }
+    }
+
+    impl Format for SyntaxTree {
+        fn format(&self, indent: usize) -> String {
+            let mut res = format_indented("Root", indent);
+            for decl in &self.root {
+                res.push_str(&decl.format(indent + 2));
+            }
+
+            res
+        }
+    }
+
     #[test] fn abcdef_expr() {
         let expr = "a b,c d,e f\n".as_bytes();
 
@@ -671,6 +911,30 @@ r#"Comp
       Comp
         Word "hello"
         Word "print_ln"
+"#;
+        assert_eq!(gold, pretty);
+    }
+
+    #[test] fn nop_program() {
+        let expr = concat!(
+            "nop ( ~ ) =\n",
+            "    -- Just nothing.\n"
+        ).as_bytes();
+
+        let mut lexer = lexer::Lexer::new(expr).unwrap();
+        let mut parser = Parser::new(&mut lexer).unwrap();
+        let st = parse_root(&mut parser).unwrap();
+
+        let pretty = st.format(0);
+        let gold =
+r#"Root
+  Funcdef
+    Name "nop"
+    Stackeff
+      In
+      Out
+    Expr
+      Empty
 "#;
         assert_eq!(gold, pretty);
     }
