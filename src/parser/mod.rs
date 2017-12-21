@@ -2,22 +2,22 @@ use std::io;
 
 use self::lexer::{Lexer, Token, Lexeme, LexerError, Position};
 
-mod lexer;
+pub mod lexer;
 
 #[derive(Debug, Default)]
-struct SyntaxTree {
-    root: Vec<Decl>,
+pub struct SyntaxTree {
+    pub root: Vec<Decl>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Decl {
+pub enum Decl {
     DataDef(Pattern, Vec<Pattern>),
-    FuncDef(Name, Option<StackEff>, Expr<FullExpr>),
+    FuncDef(Name, Option<StackEff>, Expr<FullExpr>, Option<Vec<Decl>>),
     FuncType(Name, Expr<TypeExpr>)
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Expr<T> {
+pub enum Expr<T> {
     Plain(T),
     Empty,
 
@@ -35,32 +35,33 @@ impl<T> From<T> for Expr<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum TypeExpr {
+pub enum TypeExpr {
     Word(Name),
     Multiword(Name),
     Function(Box<Expr<TypeExpr>>, Box<Expr<TypeExpr>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct StackEff {
-    input: Vec<Name>,
-    output: Vec<Name>,
+pub struct StackEff {
+    pub input: Vec<Name>,
+    pub output: Vec<Name>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Name(String, Position);
+pub struct Name(String, Position);
 
 #[derive(Debug, Clone, PartialEq)]
-struct Branch(Vec<Expr<Pattern>>, Expr<FullExpr>);
+pub struct Branch(Vec<Expr<Pattern>>, Expr<FullExpr>);
 
 #[derive(Debug, Clone, PartialEq)]
-enum FullExpr {
+pub enum FullExpr {
     Quote(Box<Expr<FullExpr>>),
     List(Box<Expr<FullExpr>>),
 
     Infix(Box<Expr<FullExpr>>, Name, Box<Expr<FullExpr>>),
     Simple(Simple),
     Lambda(Expr<Pattern>, Box<Expr<FullExpr>>),
+    Block(Box<Expr<FullExpr>>),
 
     Case(Box<Expr<FullExpr>>, Vec<Branch>),
     If(Box<Expr<FullExpr>>, Box<Expr<FullExpr>>, Option<Box<Expr<FullExpr>>>),
@@ -73,7 +74,7 @@ impl From<Simple> for Expr<FullExpr> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Pattern {
+pub enum Pattern {
     Placeholder(Position),
     Simple(Simple),
 }
@@ -85,7 +86,7 @@ impl From<Simple> for Expr<Pattern> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Simple {
+pub enum Simple {
     Word(String, Position),
     String(String, Position),
     Char(char, Position),
@@ -330,7 +331,7 @@ fn parse_funcdef<R: io::Read, T>(parser: &mut Parser<R, T>, name: Name) -> Resul
     parser.shift_lexer()?;
     let expr = parse_in_block(parser, parse_fullexpr)?;
 
-    Ok(Decl::FuncDef(name, eff, expr))
+    Ok(Decl::FuncDef(name, eff, expr, None))
 }
 
 fn check_word<R: io::Read, T>(parser: &mut Parser<R, T>) -> Result<bool, ParserError> {
@@ -814,7 +815,7 @@ mod tests {
     impl Format for Decl {
         fn format(&self, indent: usize) -> String {
             match self {
-                &Decl::FuncDef(ref name, ref stack_eff, ref expr) => {
+                &Decl::FuncDef(ref name, ref stack_eff, ref expr, _) => {
                     let mut res = format_indented("Funcdef", indent);
 
                     res.push_str(&name.format(indent + 2));
