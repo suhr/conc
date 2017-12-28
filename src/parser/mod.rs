@@ -11,7 +11,7 @@ pub struct SyntaxTree {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
-    DataDef(Pattern, Vec<Pattern>),
+    //DataDef(Expr<TypeExpr>, Vec<TypeDecl>),
     FuncDef(Name, Option<StackEff>, Expr<FullExpr>, Option<Vec<Decl>>),
     FuncType(Name, Expr<TypeExpr>)
 }
@@ -48,7 +48,7 @@ pub struct StackEff {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Name(String, Position);
+pub struct Name(pub String, pub Position);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Branch(Vec<Expr<Pattern>>, Expr<FullExpr>);
