@@ -6,3 +6,4 @@ authors = ["Сухарик <suhr@i2pmail.org>"]
 [dependencies]
 regex = "0.2"
 lazy_static = "0.2"
+either = "1.4"

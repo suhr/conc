@@ -1,3 +1,5 @@
+use either::Either;
+
 use super::parser::{self};
 use super::parser::lexer::Position;
 use std::collections::HashMap;
@@ -112,7 +114,7 @@ enum FullExpr {
     Comp(Vec<FullExpr>, ExprCtx),
     Conc(Vec<FullExpr>, ExprCtx),
     Quote(Box<FullExpr>, ExprCtx),
-    Lambda(Option<Pattern>, Box<FullExpr>, ExprCtx),
+    Lambda(Lambda, ExprCtx),
     Case(usize, Vec<Branch>),
     If(Box<FullExpr>, Box<FullExpr>, ExprCtx),
     Literal(Literal, ExprCtx),
@@ -153,11 +155,115 @@ enum TypeExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 enum TransError {
-    
+
 }
 
-fn derive_pattern_vars() {
-    unimplemented!();
+fn translate_simple(simple: parser::Simple) -> Either<Word, Literal> {
+    use parser::Simple;
+    use self::Either::*;
+
+    match simple {
+        Simple::Word(word, pos) => Left(
+            Word {
+                word,
+                position: pos,
+            }
+        ),
+        Simple::Char(c, pos) => Right(
+            Literal::Char(c, pos)
+        ),
+        Simple::Float(f, pos) => Right(
+            Literal::Float(f, pos)
+        ),
+        Simple::Integer(i, pos) => Right(
+            Literal::Integer(i, pos)
+        ),
+        Simple::String(s, pos) => Right(
+            Literal::String(s, pos)
+        ),
+    }
+}
+
+fn translate_pattern(pat: parser::Expr<parser::Pattern>) -> Pattern {
+    use parser::Expr;
+    use parser::Pattern as Pat;
+
+    match pat {
+        Expr::Comp(comp) => {
+            let mut c = vec![];
+            for pat in comp {
+                let p = translate_pattern(pat);
+                c.push(p)
+            }
+
+            Pattern::Comp(c)
+        },
+        Expr::Conc(conc) => {
+            let mut c = vec![];
+            for pat in conc {
+                let p = translate_pattern(pat);
+                c.push(p)
+            }
+
+            Pattern::Conc(c)
+        },
+        Expr::Enclosed(pat) =>
+            translate_pattern(*pat),
+        Expr::Mexpr(name, pat) => {
+            let word = Word {
+                word: name.0,
+                position: name.1,
+            };
+            let pat = translate_pattern(*pat);
+
+            Pattern::Comp(vec![pat, Pattern::Word(word)])
+        },
+        Expr::Tuple(_) => unimplemented!(),
+        Expr::Plain(pat) => {
+            match pat {
+                Pat::Placeholder(_) =>
+                    Pattern::Placeholder,
+                Pat::Simple(s) => {
+                    match translate_simple(s) {
+                        Either::Left(w) => Pattern::Word(w),
+                        Either::Right(l) => Pattern::Literal(l),
+                    }
+                }
+            }
+        },
+        Expr::Empty =>
+            Pattern::Empty,
+    }
+}
+
+fn analyze_pattern_vars(pat: Pattern, vars: &mut Vec<VariableId>, nesting: usize) -> Pattern {
+    match pat {
+        Pattern::Comp(comp) => {
+            unimplemented!()
+        },
+        Pattern::Conc(mut conc) => {
+            for pat in &mut conc {
+                let t = ::std::mem::replace(pat, Pattern::Empty);
+                *pat = analyze_pattern_vars(t, vars, nesting);
+            }
+
+            Pattern::Conc(conc)
+        },
+        Pattern::Word(ref word) => {
+            let word = word.clone();
+            let var = Variable {
+                id: VariableId {
+                    name: word.word,
+                    nesting,
+                },
+                position: word.position,
+            };
+
+            vars.push(var.id.clone());
+            Pattern::Variable(var)
+        },
+        pat => pat,
+    }
 }
 
 fn collect_symbols(decls: &[parser::Decl], path: &mut Vec<String>) -> Result<Vec<Symbol>, TransError> {
@@ -170,7 +276,7 @@ fn collect_symbols(decls: &[parser::Decl], path: &mut Vec<String>) -> Result<Vec
             },
             &parser::Decl::FuncDef(ref name, _, _, ref moar) => {
                 syms.push(Symbol::new(path.clone(), name.0.clone()));
-                
+
                 if let &Some(ref moar) = moar {
                     path.push(name.0.clone());
                     syms.extend(collect_symbols(moar, path)?);
@@ -195,8 +301,8 @@ fn translate_decl(tree: Vec<parser::Decl>, mut path: Vec<Symbol>) -> Result<Dict
                 dict.get_mut(&Symbol::from_name(name.0));
             },
             parser::Decl::FuncDef(name, eff, expr, moar) => {
-                
-                
+
+
                 if let Some(moar) = moar {
                     path.push(Symbol::from_name(name.0));
                     //let decl = translate_decl(tree, path);
@@ -217,6 +323,7 @@ fn translate_func_ty(ty: parser::Expr<parser::TypeExpr>) -> Result<Function, Tra
 struct ExprTranslator {
     level: usize,
     defined_vars: Vec<VariableId>,
+    symbols: Vec<Symbol>,
 }
 
 fn translate_expr(expr: parser::Expr<parser::FullExpr>, trans: &mut ExprTranslator) -> Result<FullExpr, TransError> {
@@ -236,7 +343,7 @@ fn translate_expr(expr: parser::Expr<parser::FullExpr>, trans: &mut ExprTranslat
 
             FullExpr::Comp(res, Default::default())
         },
-        parser::Expr::Enclosed(expr) => 
+        parser::Expr::Enclosed(expr) =>
             translate_expr(*expr, trans)?,
         parser::Expr::Mexpr(_, _) => unimplemented!(),
         parser::Expr::Tuple(_) => unimplemented!(),
