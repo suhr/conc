@@ -2,8 +2,11 @@
 name = "conc"
 version = "0.1.0"
 authors = ["Сухарик <suhr@i2pmail.org>"]
+edition = "2018"
 
 [dependencies]
 regex = "0.2"
 lazy_static = "0.2"
 either = "1.4"
+rowan = "0.5"
+text_unit = { version = "0.1.6" }
